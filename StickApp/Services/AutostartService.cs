@@ -9,17 +9,41 @@ public static class AutostartService
 
     public static bool IsEnabled()
     {
-        using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
-        return key?.GetValue(ValueName) != null;
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
+            return key?.GetValue(ValueName) != null;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static void SetEnabled(bool enabled)
     {
-        using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true)
-                         ?? Registry.CurrentUser.CreateSubKey(RunKeyPath)!;
-        if (enabled)
-            key.SetValue(ValueName, $"\"{Environment.ProcessPath}\"");
-        else
-            key.DeleteValue(ValueName, throwOnMissingValue: false);
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true)
+                             ?? Registry.CurrentUser.CreateSubKey(RunKeyPath);
+            if (key is null) return;
+
+            if (enabled)
+            {
+                var processPath = Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(processPath))
+                {
+                    key.SetValue(ValueName, $"\"{processPath}\"");
+                }
+            }
+            else
+            {
+                key.DeleteValue(ValueName, throwOnMissingValue: false);
+            }
+        }
+        catch
+        {
+            // Suppress registry permission or policy restrictions
+        }
     }
 }

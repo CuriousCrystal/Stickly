@@ -2,14 +2,32 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
-using Microsoft.Win32;
 using StickApp.Models;
 using StickApp.Services;
+
+using WpfColor = System.Windows.Media.Color;
+using WpfColorConverter = System.Windows.Media.ColorConverter;
+using WpfBrushes = System.Windows.Media.Brushes;
+using WpfPoint = System.Windows.Point;
+using WpfClipboard = System.Windows.Clipboard;
+using WpfMessageBox = System.Windows.MessageBox;
+using WpfImage = System.Windows.Controls.Image;
+using WpfButton = System.Windows.Controls.Button;
+using WpfGrid = System.Windows.Controls.Grid;
+using WpfBorder = System.Windows.Controls.Border;
+using WpfCursors = System.Windows.Input.Cursors;
+using WpfOpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using WpfHorizontalAlignment = System.Windows.HorizontalAlignment;
+using WpfVerticalAlignment = System.Windows.VerticalAlignment;
+using WpfMouseEventArgs = System.Windows.Input.MouseEventArgs;
+using WpfKeyEventArgs = System.Windows.Input.KeyEventArgs;
+using WpfDragEventArgs = System.Windows.DragEventArgs;
 
 namespace StickApp;
 
@@ -20,14 +38,19 @@ public partial class NoteWindow : Window
     public Note Note { get; }
     public event Action? Changed;
     public event Action<NoteWindow>? Removed;
+    public event Action? NewNoteRequested;
 
     private bool _isLoaded;
+    private bool _isExplicitlyDeleted;
 
-    private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".bmp", ".gif" };
-    private static readonly string[] BackgroundExtensions = { ".png", ".jpg", ".jpeg" };
+    private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp" };
 
     private const double MinImageSize = 30;
     private const double MaxImageSize = 220;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     public NoteWindow(Note note)
     {
@@ -37,44 +60,123 @@ public partial class NoteWindow : Window
         _isLoaded = true;
     }
 
+    public void BringToFront()
+    {
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        Show();
+        Topmost = true;
+        Topmost = false;
+        Activate();
+        Focus();
+        NoteText.Focus();
+
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            SetForegroundWindow(hwnd);
+        }
+    }
+
     private void LoadNote()
     {
-        Left = Note.X;
-        Top = Note.Y;
-        Width = Note.Width;
-        Height = Note.Height;
-        ApplyBackground(Note.Color);
+        double screenLeft = SystemParameters.VirtualScreenLeft;
+        double screenTop = SystemParameters.VirtualScreenTop;
+        double screenWidth = SystemParameters.VirtualScreenWidth;
+        double screenHeight = SystemParameters.VirtualScreenHeight;
+
+        double targetWidth = Math.Max(MinWidth, Math.Min(Note.Width, screenWidth));
+        double targetHeight = Math.Max(MinHeight, Math.Min(Note.Height, screenHeight));
+
+        double targetLeft = Note.X;
+        double targetTop = Note.Y;
+
+        if (targetLeft + targetWidth < screenLeft + 40 || targetLeft > screenLeft + screenWidth - 40)
+        {
+            targetLeft = screenLeft + 80;
+        }
+
+        if (targetTop + 30 < screenTop || targetTop > screenTop + screenHeight - 60)
+        {
+            targetTop = screenTop + 80;
+        }
+
+        Left = targetLeft;
+        Top = targetTop;
+        Width = targetWidth;
+        Height = targetHeight;
+        Note.X = Left;
+        Note.Y = Top;
+        Note.Width = Width;
+        Note.Height = Height;
+
+        ApplyNoteColor(Note.Color);
         NoteText.Text = Note.Text;
         RefreshImages();
     }
 
-    private void ApplyBackground(string fallbackColorHex)
+    private static readonly string[] BackgroundExtensions = { ".png", ".jpg", ".jpeg" };
+
+    private void ApplyNoteColor(string fallbackColorHex)
     {
         var backgroundPath = BackgroundExtensions
             .Select(ext => Path.Combine(AppContext.BaseDirectory, "Assets", "background" + ext))
             .FirstOrDefault(File.Exists);
 
-        if (backgroundPath is null)
+        bool useImage = (fallbackColorHex == "Image" || (backgroundPath is not null && (string.IsNullOrEmpty(fallbackColorHex) || fallbackColorHex == "#FFF6A6")));
+
+        if (useImage && backgroundPath is not null)
         {
-            var color = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(fallbackColorHex);
-            RootGrid.Background = new SolidColorBrush(color);
-            BackgroundImage.Visibility = Visibility.Collapsed;
-            BackgroundImage.Source = null;
+            RootGrid.Background = WpfBrushes.Black;
+
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.UriSource = new Uri(backgroundPath);
+            bitmap.EndInit();
+            bitmap.Freeze();
+
+            BackgroundImage.Source = bitmap;
+            BackgroundImage.Opacity = 1.0;
+            BackgroundImage.Effect = new BlurEffect { Radius = 10 };
+            BackgroundImage.Visibility = Visibility.Visible;
+
+            NoteText.Foreground = WpfBrushes.Yellow;
+            NoteText.CaretBrush = WpfBrushes.Yellow;
+            NewNoteButton.Foreground = WpfBrushes.White;
+            AddPhotoButton.Foreground = WpfBrushes.White;
+            DeleteButton.Foreground = WpfBrushes.White;
             return;
         }
 
-        RootGrid.Background = System.Windows.Media.Brushes.Black;
+        BackgroundImage.Visibility = Visibility.Collapsed;
+        BackgroundImage.Source = null;
 
-        var bitmap = new BitmapImage();
-        bitmap.BeginInit();
-        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-        bitmap.UriSource = new Uri(backgroundPath);
-        bitmap.EndInit();
+        WpfColor color;
+        try
+        {
+            color = (WpfColor)WpfColorConverter.ConvertFromString(fallbackColorHex);
+        }
+        catch
+        {
+            color = (WpfColor)WpfColorConverter.ConvertFromString("#FFF6A6");
+        }
 
-        BackgroundImage.Source = bitmap;
-        BackgroundImage.Opacity = 1.0;
-        BackgroundImage.Effect = new BlurEffect { Radius = 10 };
-        BackgroundImage.Visibility = Visibility.Visible;
+        RootGrid.Background = new SolidColorBrush(color);
+
+        // Compute perceived luminance (ITU-R BT.601) to adapt text and button contrast
+        double luminance = (0.299 * color.R + 0.587 * color.G + 0.114 * color.B);
+        bool isDark = luminance < 135;
+
+        var textColor = isDark ? WpfBrushes.White : new SolidColorBrush(WpfColor.FromRgb(30, 30, 30));
+        NoteText.Foreground = textColor;
+        NoteText.CaretBrush = textColor;
+        NewNoteButton.Foreground = textColor;
+        AddPhotoButton.Foreground = textColor;
+        DeleteButton.Foreground = textColor;
     }
 
     private void RefreshImages()
@@ -82,91 +184,115 @@ public partial class NoteWindow : Window
         ImagesPanel.Children.Clear();
         foreach (var entry in Note.Images)
         {
-            ImagesPanel.Children.Add(BuildThumbnail(entry));
+            var thumb = BuildThumbnail(entry);
+            if (thumb is not null)
+            {
+                ImagesPanel.Children.Add(thumb);
+            }
         }
 
-        ImagesRow.Height = Note.Images.Count > 0 ? GridLength.Auto : new GridLength(0);
-        ClearPhotosItem.IsEnabled = Note.Images.Count > 0;
+        ImagesRow.Height = ImagesPanel.Children.Count > 0 ? GridLength.Auto : new GridLength(0);
+        ClearPhotosItem.IsEnabled = ImagesPanel.Children.Count > 0;
     }
 
-    private FrameworkElement BuildThumbnail(NoteImage entry)
+    private FrameworkElement? BuildThumbnail(NoteImage entry)
     {
-        var bitmap = new BitmapImage();
-        bitmap.BeginInit();
-        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-        bitmap.UriSource = new Uri(NoteStore.GetImagePath(entry.FileName));
-        bitmap.EndInit();
+        var imagePath = NoteStore.GetImagePath(entry.FileName);
+        if (!File.Exists(imagePath)) return null;
 
-        var image = new System.Windows.Controls.Image
+        try
         {
-            Source = bitmap,
-            Stretch = Stretch.Uniform,
-            Height = entry.Size
-        };
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.UriSource = new Uri(imagePath);
+            bitmap.DecodePixelHeight = Math.Max(40, (int)entry.Size * 2);
+            bitmap.EndInit();
+            bitmap.Freeze();
 
-        var container = new System.Windows.Controls.Grid
-        {
-            Height = entry.Size,
-            Margin = new Thickness(2)
-        };
-        container.Children.Add(image);
+            var image = new WpfImage
+            {
+                Source = bitmap,
+                Stretch = Stretch.Uniform,
+                Height = entry.Size
+            };
 
-        var removeButton = new System.Windows.Controls.Button
-        {
-            Content = "✕",
-            Width = 16,
-            Height = 16,
-            Padding = new Thickness(0),
-            FontSize = 9,
-            Style = (Style)FindResource("HeaderIconButtonStyle"),
-            Foreground = System.Windows.Media.Brushes.White,
-            BorderThickness = new Thickness(0),
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
-            VerticalAlignment = System.Windows.VerticalAlignment.Top
-        };
-        removeButton.Click += (_, _) => RemoveImage(entry.FileName);
-        container.Children.Add(removeButton);
+            var container = new WpfGrid
+            {
+                Height = entry.Size,
+                Margin = new Thickness(2)
+            };
+            container.Children.Add(image);
 
-        var resizeGrip = new System.Windows.Controls.Border
-        {
-            Width = 16,
-            Height = 16,
-            Background = System.Windows.Media.Brushes.Black,
-            Opacity = 0.5,
-            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
-            VerticalAlignment = System.Windows.VerticalAlignment.Bottom,
-            Cursor = System.Windows.Input.Cursors.SizeNWSE
-        };
+            var removeButton = new WpfButton
+            {
+                Content = "✕",
+                Width = 16,
+                Height = 16,
+                Padding = new Thickness(0),
+                FontSize = 9,
+                Style = (Style)FindResource("HeaderIconButtonStyle"),
+                Foreground = WpfBrushes.White,
+                Background = new SolidColorBrush(WpfColor.FromArgb(160, 0, 0, 0)),
+                BorderThickness = new Thickness(0),
+                HorizontalAlignment = WpfHorizontalAlignment.Right,
+                VerticalAlignment = WpfVerticalAlignment.Top
+            };
+            removeButton.Click += (_, _) => RemoveImage(entry.FileName);
+            container.Children.Add(removeButton);
 
-        double dragStartSize = 0;
-        System.Windows.Point dragStartPoint = default;
+            var resizeGrip = new WpfBorder
+            {
+                Width = 14,
+                Height = 14,
+                Background = WpfBrushes.Black,
+                Opacity = 0.4,
+                HorizontalAlignment = WpfHorizontalAlignment.Right,
+                VerticalAlignment = WpfVerticalAlignment.Bottom,
+                Cursor = WpfCursors.SizeNWSE
+            };
 
-        resizeGrip.MouseLeftButtonDown += (_, e) =>
-        {
-            dragStartSize = entry.Size;
-            dragStartPoint = e.GetPosition(this);
-            resizeGrip.CaptureMouse();
-            e.Handled = true;
-        };
-        resizeGrip.MouseMove += (_, e) =>
-        {
-            if (!resizeGrip.IsMouseCaptured) return;
-            var current = e.GetPosition(this);
-            double delta = Math.Max(current.X - dragStartPoint.X, current.Y - dragStartPoint.Y);
-            double newSize = Math.Clamp(dragStartSize + delta, MinImageSize, MaxImageSize);
-            entry.Size = newSize;
-            image.Height = newSize;
-            container.Height = newSize;
-        };
-        resizeGrip.MouseLeftButtonUp += (_, _) =>
-        {
-            if (!resizeGrip.IsMouseCaptured) return;
-            resizeGrip.ReleaseMouseCapture();
-            RaiseChanged();
-        };
-        container.Children.Add(resizeGrip);
+            double dragStartSize = 0;
+            WpfPoint dragStartPoint = default;
 
-        return container;
+            resizeGrip.MouseLeftButtonDown += (_, e) =>
+            {
+                dragStartSize = entry.Size;
+                dragStartPoint = e.GetPosition(this);
+                resizeGrip.CaptureMouse();
+                e.Handled = true;
+            };
+
+            resizeGrip.MouseMove += (_, e) =>
+            {
+                if (!resizeGrip.IsMouseCaptured) return;
+                var current = e.GetPosition(this);
+                double delta = Math.Max(current.X - dragStartPoint.X, current.Y - dragStartPoint.Y);
+                double newSize = Math.Clamp(dragStartSize + delta, MinImageSize, MaxImageSize);
+                entry.Size = newSize;
+                image.Height = newSize;
+                container.Height = newSize;
+            };
+
+            resizeGrip.MouseLeftButtonUp += (_, _) =>
+            {
+                if (!resizeGrip.IsMouseCaptured) return;
+                resizeGrip.ReleaseMouseCapture();
+                RaiseChanged();
+            };
+
+            resizeGrip.LostMouseCapture += (_, _) =>
+            {
+                RaiseChanged();
+            };
+
+            container.Children.Add(resizeGrip);
+            return container;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void RaiseChanged()
@@ -177,9 +303,14 @@ public partial class NoteWindow : Window
 
     private void AddImageFromFile(string path)
     {
-        Note.Images.Add(new NoteImage { FileName = NoteStore.CopyImageIn(path) });
-        RefreshImages();
-        RaiseChanged();
+        try
+        {
+            var savedName = NoteStore.CopyImageIn(path);
+            Note.Images.Add(new NoteImage { FileName = savedName });
+            RefreshImages();
+            RaiseChanged();
+        }
+        catch { }
     }
 
     private void RemoveImage(string fileName)
@@ -215,18 +346,33 @@ public partial class NoteWindow : Window
         RaiseChanged();
     }
 
-    private void NoteText_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    private void NoteText_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (!_isLoaded) return;
         Note.Text = NoteText.Text;
         RaiseChanged();
     }
 
+    private void NewNote_Click(object sender, RoutedEventArgs e)
+    {
+        NewNoteRequested?.Invoke();
+    }
+
+    private void SetColor_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: string hexColor })
+        {
+            Note.Color = hexColor;
+            ApplyNoteColor(hexColor);
+            RaiseChanged();
+        }
+    }
+
     private void AddPhoto_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new Microsoft.Win32.OpenFileDialog
+        var dialog = new WpfOpenFileDialog
         {
-            Filter = "Images|*.png;*.jpg;*.jpeg;*.bmp;*.gif",
+            Filter = "Images|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp",
             Multiselect = true
         };
         if (dialog.ShowDialog() == true)
@@ -251,37 +397,63 @@ public partial class NoteWindow : Window
 
     private void DeleteNote_Click(object sender, RoutedEventArgs e)
     {
-        Close();
-    }
+        var result = WpfMessageBox.Show(
+            this,
+            "Are you sure you want to permanently delete this note?",
+            "Delete Note",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
 
-    private void NoteWindow_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
-    {
-        DeleteButton.Visibility = Visibility.Visible;
-        AddPhotoButton.Visibility = Visibility.Visible;
-    }
-
-    private void NoteWindow_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
-    {
-        DeleteButton.Visibility = Visibility.Collapsed;
-        AddPhotoButton.Visibility = Visibility.Collapsed;
-    }
-
-    private void NoteWindow_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
-    {
-        if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control && System.Windows.Clipboard.ContainsImage())
+        if (result == MessageBoxResult.Yes)
         {
-            var image = System.Windows.Clipboard.GetImage();
-            if (image is not null)
-            {
-                Note.Images.Add(new NoteImage { FileName = NoteStore.SaveClipboardImage(image) });
-                RefreshImages();
-                RaiseChanged();
-            }
-            e.Handled = true;
+            _isExplicitlyDeleted = true;
+            Close();
         }
     }
 
-    private void NoteWindow_Drop(object sender, System.Windows.DragEventArgs e)
+    private void NoteWindow_MouseEnter(object sender, WpfMouseEventArgs e)
+    {
+        NewNoteButton.Visibility = Visibility.Visible;
+        AddPhotoButton.Visibility = Visibility.Visible;
+        DeleteButton.Visibility = Visibility.Visible;
+    }
+
+    private void NoteWindow_MouseLeave(object sender, WpfMouseEventArgs e)
+    {
+        NewNoteButton.Visibility = Visibility.Collapsed;
+        AddPhotoButton.Visibility = Visibility.Collapsed;
+        DeleteButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void NoteWindow_PreviewKeyDown(object sender, WpfKeyEventArgs e)
+    {
+        if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            if (WpfClipboard.ContainsText())
+            {
+                return;
+            }
+
+            if (WpfClipboard.ContainsImage())
+            {
+                try
+                {
+                    var image = WpfClipboard.GetImage();
+                    if (image is not null)
+                    {
+                        var name = NoteStore.SaveClipboardImage(image);
+                        Note.Images.Add(new NoteImage { FileName = name });
+                        RefreshImages();
+                        RaiseChanged();
+                        e.Handled = true;
+                    }
+                }
+                catch { }
+            }
+        }
+    }
+
+    private void NoteWindow_Drop(object sender, WpfDragEventArgs e)
     {
         if (!e.Data.GetDataPresent(System.Windows.DataFormats.FileDrop)) return;
         if (e.Data.GetData(System.Windows.DataFormats.FileDrop) is not string[] files || files.Length == 0) return;
@@ -296,27 +468,14 @@ public partial class NoteWindow : Window
     private void NoteWindow_Closing(object? sender, CancelEventArgs e)
     {
         if (SuppressCloseHandling) return;
-        foreach (var entry in Note.Images)
+
+        if (_isExplicitlyDeleted)
         {
-            NoteStore.DeleteImage(entry.FileName);
+            foreach (var entry in Note.Images)
+            {
+                NoteStore.DeleteImage(entry.FileName);
+            }
+            Removed?.Invoke(this);
         }
-        Removed?.Invoke(this);
-    }
-
-    [DllImport("user32.dll")]
-    private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
-    [DllImport("user32.dll")]
-    private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-
-    private const int GWL_EXSTYLE = -20;
-    private const int WS_EX_TOOLWINDOW = 0x80;
-    private const int WS_EX_APPWINDOW = 0x40000;
-
-    private void NoteWindow_SourceInitialized(object? sender, EventArgs e)
-    {
-        var hwnd = new WindowInteropHelper(this).Handle;
-        int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
-        SetWindowLong(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW);
     }
 }

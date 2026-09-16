@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\JimNightshade-Regular.ttf" />
+    <Resource Include="Assets\icon.ico" />
     <None Include="Assets\background.*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Assets\icon.*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
